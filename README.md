@@ -17,3 +17,5 @@ cd frontend && npm run serve
 ```
 
 ## 效果图
+
+![llm-chat-web](https://github.com/user-attachments/assets/3db2833c-1a4a-4929-8146-ae54cf5db694)
