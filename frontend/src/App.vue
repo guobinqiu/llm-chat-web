@@ -4,6 +4,7 @@
       <b>{{ msg.role }}:</b> {{ msg.content }}
     </div>
     <input v-model="text" placeholder="Say something..." @keyup.enter="sendMsg" />
+    <button @click="stop">Stop</button>
   </div>
 </template>
 
@@ -92,6 +93,24 @@ export default {
 
       // 清空输入框
       this.text = '';
+    },
+    async stop() {
+      try {
+        const response = await fetch('http://localhost:8080/stop', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        console.log('停止成功');
+
+      } catch (error) {
+        console.error('停止请求失败:', error);
+      }
     }
   }
 }

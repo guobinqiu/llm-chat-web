@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
@@ -25,6 +24,10 @@ type ChatClient struct {
 	model        string
 	messages     []openai.ChatCompletionMessage // 用于存储历史消息，实现多轮对话
 	retainNum    int                            // 超过n条就合并
+	ctx          context.Context
+	cancel       context.CancelFunc
+	temperature  float32 // 控制回答的随机性，范围是 0 到 2（默认 1）
+	maxTokens    int     // 限制返回的最大 token 数
 }
 
 func main() {
@@ -46,9 +49,12 @@ func main() {
 		model:        model,
 		messages:     make([]openai.ChatCompletionMessage, 0),
 		retainNum:    10,
+		temperature:  0.7,
+		maxTokens:    512,
 	}
 
 	http.HandleFunc("/ws", cc.ChatLoop)
+	http.HandleFunc("/stop", cc.StopChat)
 	log.Println("Server started on :8080")
 	err := http.ListenAndServe(":8080", nil)
 	if err != nil {
@@ -66,20 +72,19 @@ func (cc *ChatClient) ChatLoop(w http.ResponseWriter, r *http.Request) {
 	for {
 		_, msgBytes, err := ws.ReadMessage()
 		if err != nil {
-			log.Printf("error: %v", err)
+			log.Printf("读取消息失败: %v", err)
 			break
 		}
 
 		if err := cc.ProcessQuery(ws, string(msgBytes)); err != nil {
-			fmt.Printf("请求失败: %v\n", err)
-			continue
+			log.Printf("处理失败: %v", err)
 		}
 	}
 }
 
 func (cc *ChatClient) ProcessQuery(ws *websocket.Conn, userInput string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
+	cc.ctx, cc.cancel = context.WithCancel(context.Background())
+	defer cc.cancel()
 
 	// 合并上下文
 	if err := cc.Merge(); err != nil {
@@ -92,10 +97,12 @@ func (cc *ChatClient) ProcessQuery(ws *websocket.Conn, userInput string) error {
 		Content: userInput,
 	})
 
-	stream, err := cc.openaiClient.CreateChatCompletionStream(ctx, openai.ChatCompletionRequest{
-		Model:    cc.model,
-		Messages: cc.messages,
-		Stream:   true, // 开启流式响应
+	stream, err := cc.openaiClient.CreateChatCompletionStream(cc.ctx, openai.ChatCompletionRequest{
+		Model:       cc.model,
+		Messages:    cc.messages,
+		Stream:      true, // 开启流式响应
+		Temperature: cc.temperature,
+		MaxTokens:   cc.maxTokens,
 	})
 	if err != nil {
 		return err
@@ -122,6 +129,13 @@ func (cc *ChatClient) ProcessQuery(ws *websocket.Conn, userInput string) error {
 
 				break
 			}
+
+			if errors.Is(err, context.Canceled) {
+				log.Println("流被取消")
+				ws.WriteMessage(websocket.BinaryMessage, []byte("\n"))
+				return err
+			}
+
 			log.Printf("stream receive error: %v", err)
 			break
 		}
@@ -173,14 +187,11 @@ func (cc *ChatClient) Summarize(history []openai.ChatCompletionMessage) (string,
 }
 
 func (cc *ChatClient) CallOpenAI(messages []openai.ChatCompletionMessage) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	resp, err := cc.openaiClient.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
+	resp, err := cc.openaiClient.CreateChatCompletion(cc.ctx, openai.ChatCompletionRequest{
 		Model:       cc.model,
 		Messages:    messages,
-		Temperature: 0.7, // 控制回答的随机性，范围是 0 到 2（默认 1）
-		MaxTokens:   512, // 限制返回的最大 token 数
+		Temperature: cc.temperature,
+		MaxTokens:   cc.maxTokens,
 	})
 	if err != nil {
 		return "", err
@@ -190,4 +201,11 @@ func (cc *ChatClient) CallOpenAI(messages []openai.ChatCompletionMessage) (strin
 	}
 
 	return resp.Choices[0].Message.Content, nil
+}
+
+func (cc *ChatClient) StopChat(w http.ResponseWriter, r *http.Request) {
+	if cc.cancel != nil {
+		cc.cancel()
+	}
+	fmt.Fprintln(w, "stopped")
 }
