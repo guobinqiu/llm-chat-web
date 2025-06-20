@@ -1,4 +1,4 @@
-module github.com/guobinqiu/mcp-host-web
+module github.com/guobinqiu/llm-chat-web
 
 go 1.23.9
 
