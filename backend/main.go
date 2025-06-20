@@ -246,9 +246,9 @@ func (hb *Heartbeat) StartHeartbeat() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		hb.mu.Lock()
+		hb.mu.RLock()
 		lastPong := time.Unix(hb.lastPongUnix, 0)
-		hb.mu.Unlock()
+		hb.mu.RUnlock()
 		if time.Since(lastPong) > hb.pingInterval+hb.pongTimeout { // 距离上次收到Pong已经超过了8秒就判定客户端断线
 			log.Println("未收到客户端pong，断开连接")
 			hb.ws.Close()
