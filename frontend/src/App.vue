@@ -33,11 +33,13 @@ export default {
     }
   },
   mounted() {
-    // 初始化 WebSocket 连接
-    this.initSocket();
+    this.connect();
+  },
+  beforeDestroy() {
+    this.socket.close();
   },
   methods: {
-    initSocket() {
+    connect() {
       // 初始化 WebSocket 连接
       this.socket = new WebSocket('ws://localhost:8080/ws');
 
@@ -71,11 +73,16 @@ export default {
       // 错误处理
       this.socket.onerror = (error) => {
         console.error("WebSocket error:", error);
+        this.stopSocket();
       };
 
       // 连接关闭时的回调
       this.socket.onclose = () => {
         console.log("WebSocket connection closed.");
+        setTimeout(() => {
+          console.log("尝试重连...");
+          this.connect();
+        }, 5000);
       };
     },
     sendMsg() {
@@ -110,6 +117,12 @@ export default {
 
       } catch (error) {
         console.error('停止请求失败:', error);
+      }
+    },
+    stopSocket() {
+      if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+        this.socket.close();
+        this.socket = null;
       }
     }
   }

@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
@@ -28,6 +30,14 @@ type ChatClient struct {
 	cancel       context.CancelFunc
 	temperature  float32 // 控制回答的随机性，范围是 0 到 2（默认 1）
 	maxTokens    int     // 限制返回的最大 token 数
+}
+
+type Heartbeat struct {
+	lastPongUnix int64 // 存储最后一次收到pong的时间戳
+	mu           sync.RWMutex
+	pingInterval time.Duration
+	pongTimeout  time.Duration
+	ws           *websocket.Conn
 }
 
 func main() {
@@ -68,6 +78,27 @@ func (cc *ChatClient) ChatLoop(w http.ResponseWriter, r *http.Request) {
 		log.Fatal(err)
 	}
 	defer ws.Close()
+
+	heartbeat := &Heartbeat{
+		lastPongUnix: time.Now().Unix(),
+		pingInterval: 5 * time.Second,
+		pongTimeout:  3 * time.Second,
+		ws:           ws,
+	}
+
+	ws.SetReadLimit(1 * 1024 * 1024) // 1MB
+
+	// 监听pong消息
+	ws.SetPongHandler(func(string) error {
+		log.Println("收到客户端pong")
+		heartbeat.mu.Lock()
+		heartbeat.lastPongUnix = time.Now().Unix()
+		heartbeat.mu.Unlock()
+		return nil
+	})
+
+	// 心跳检测
+	go heartbeat.StartHeartbeat()
 
 	for {
 		_, msgBytes, err := ws.ReadMessage()
@@ -208,4 +239,36 @@ func (cc *ChatClient) StopChat(w http.ResponseWriter, r *http.Request) {
 		cc.cancel()
 	}
 	fmt.Fprintln(w, "stopped")
+}
+
+func (hb *Heartbeat) StartHeartbeat() {
+	ticker := time.NewTicker(hb.pingInterval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		hb.mu.Lock()
+		lastPong := time.Unix(hb.lastPongUnix, 0)
+		hb.mu.Unlock()
+		if time.Since(lastPong) > hb.pingInterval+hb.pongTimeout { // 距离上次收到Pong已经超过了8秒就判定客户端断线
+			log.Println("未收到客户端pong，断开连接")
+			hb.ws.Close()
+			return
+		}
+
+		log.Println("服务端发送ping")
+
+		// 若客户端断网或关闭连接，WriteMessage 会报错
+		if err := hb.ws.WriteMessage(websocket.PingMessage, []byte("")); err != nil {
+
+			// 断网之后连接就作废了需要重开新的连接
+			// 连接失效后必须关闭，避免资源泄漏
+			// ws.Close() 会触发客户端的 onclose 回调
+			hb.ws.Close()
+
+			log.Println("发送ping失败，断开连接:", err)
+
+			// 退出这个协程
+			return
+		}
+	}
 }
