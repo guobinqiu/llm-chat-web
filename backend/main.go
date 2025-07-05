@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
 	"github.com/sashabaranov/go-openai"
@@ -63,8 +65,10 @@ func main() {
 		maxTokens:    512,
 	}
 
-	http.HandleFunc("/ws", cc.ChatLoop)
-	http.HandleFunc("/stop", cc.StopChat)
+	http.HandleFunc("/ws", WithAuth(cc.ChatLoop))
+	http.HandleFunc("/stop", WithAuth(cc.StopChat))
+	http.HandleFunc("/login", withCORS(LoginHandler))
+
 	log.Println("Server started on :8080")
 	err := http.ListenAndServe(":8080", nil)
 	if err != nil {
@@ -271,4 +275,188 @@ func (hb *Heartbeat) StartHeartbeat() {
 			return
 		}
 	}
+}
+
+// ======================== 添加用户相关代码 =======================
+
+// 添加 /login http接口
+type LoginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type LoginResponse struct {
+	// UserID string `json:"user_id"`
+	Token string `json:"token"`
+}
+
+// mock 用户
+// var users = map[string]string{
+// 	"alice": "password123",
+// 	"bob":   "password456",
+// }
+
+type User struct {
+	ID       string `json:"id"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+var users = []User{
+	{ID: "1", Username: "alice", Password: "password123"},
+	{ID: "2", Username: "bob", Password: "password456"},
+}
+
+func LoginHandler(w http.ResponseWriter, r *http.Request) {
+	var req LoginRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// expectedPassword, ok := users[req.Username]
+	// if !ok || expectedPassword != req.Password {
+	// 	http.Error(w, "Invalid username or password", http.StatusUnauthorized)
+	// 	return
+	// }
+	// userID := fmt.Sprintf("user=%s", req.Username)
+	// resp := LoginResponse{
+	// 	UserID: userID,
+	// }
+
+	user, err := AuthenticateUser(req.Username, req.Password)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+	}
+	token, err := GenerateJWT(*user)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	resp := LoginResponse{
+		Token: token,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+var jwtSecret = []byte("孤舟蓑笠问独钓寒江月")
+
+// 生成JWT Token
+func GenerateJWT(user User) (string, error) {
+	// 存放 user_id、username、role 等简单字段
+	// 放入整个user的话虽然少一次查询，但会造成token过大，更新用户信息也不灵活
+	claims := jwt.MapClaims{
+		"user_id":  user.ID,
+		"username": user.Username,
+		"exp":      time.Now().Add(time.Hour * 24).Unix(), // 24小时后过期
+		"iat":      time.Now().Unix(),
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+	return token.SignedString(jwtSecret)
+}
+
+// 解析JWT Token
+func ParseJWT(tokenStr string) (jwt.MapClaims, error) {
+	token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
+		// 验证方法签名
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method")
+		}
+		return jwtSecret, nil
+	})
+
+	if err != nil || !token.Valid {
+		return nil, fmt.Errorf("invalid token: %v", err)
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil, fmt.Errorf("invalid token claims")
+	}
+
+	return claims, nil
+}
+
+func AuthenticateUser(username, password string) (*User, error) {
+	for _, u := range users {
+		if u.Username == username && u.Password == password {
+			return &u, nil
+		}
+	}
+	return nil, errors.New("invalid username or password")
+}
+
+// ============ 添加 middleware 组件 ==================
+func withCORS(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// 设置允许跨域的头部
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "*")
+
+		// 如果是预检请求，直接返回
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		// 执行原来的处理函数
+		handler(w, r)
+	}
+}
+
+func WithAuth(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tokenStr := extractToken(r)
+		if tokenStr == "" {
+			http.Error(w, "Unauthorized: no token provided", http.StatusUnauthorized)
+			return
+		}
+
+		claims, err := ParseJWT(tokenStr)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		userID := claims["user_id"].(string)
+
+		user, err := GetUserByID(userID)
+		if err != nil {
+			http.Error(w, "User not found", http.StatusUnauthorized)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), "user", user)
+		handler(w, r.WithContext(ctx))
+	}
+}
+
+func extractToken(r *http.Request) string {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" {
+		// Header 里格式应该是 "Bearer <token>"
+		parts := strings.SplitN(authHeader, " ", 2)
+		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
+			return parts[1]
+		}
+		return ""
+	}
+
+	// 如果 Header 没拿到，尝试从 URL 查询参数拿
+	token := r.URL.Query().Get("token")
+	return token
+}
+
+func GetUserByID(id string) (*User, error) {
+	for _, user := range users {
+		if user.ID == id {
+			return &user, nil
+		}
+	}
+	return nil, errors.New("user not found")
 }

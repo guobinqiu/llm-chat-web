@@ -1,3 +1,3 @@
-# LLM Chat Web版 (v0.3)
+# LLM Chat Web版 (v0.4)
 
-- [ ] 加入websocket心跳检测和断线重连
+- [ ] 加入多用户支持
