@@ -18,12 +18,12 @@ cd frontend && npm run serve
 
 ## 效果图
 
-<img width="618" alt="image" src="https://github.com/user-attachments/assets/679cb2b7-775a-483f-b10d-0b1ba4359a8f" />
+![llm-chat-web-v0 4](https://github.com/user-attachments/assets/1ba5fdb9-dc5e-4110-808a-78eb82240da3)
 
 ## Feature
 
 - [x] 加入停止回答功能
 - [x] 加入websocket心跳检测和断线重连
 - [x] 加入多用户支持
-- [ ] 加入多会话支持
+- [x] 加入多会话支持
 - [ ] 加入图片阅读能力
