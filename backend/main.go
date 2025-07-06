@@ -9,11 +9,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
 	"github.com/sashabaranov/go-openai"
@@ -43,31 +45,11 @@ type Heartbeat struct {
 }
 
 func main() {
-	_ = godotenv.Load()
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	baseURL := os.Getenv("OPENAI_API_BASE")
-	model := os.Getenv("OPENAI_API_MODEL")
-	if apiKey == "" || baseURL == "" || model == "" {
-		fmt.Println("检查环境变量设置")
-		return
-	}
-
-	config := openai.DefaultConfig(apiKey)
-	config.BaseURL = baseURL
-	openaiClient := openai.NewClientWithConfig(config)
-
-	cc := &ChatClient{
-		openaiClient: openaiClient,
-		model:        model,
-		messages:     make([]openai.ChatCompletionMessage, 0),
-		retainNum:    10,
-		temperature:  0.7,
-		maxTokens:    512,
-	}
-
-	http.HandleFunc("/ws", WithAuth(cc.ChatLoop))
-	http.HandleFunc("/stop", WithAuth(cc.StopChat))
+	http.HandleFunc("/ws", withCORS(WithAuth(ChatLoop)))
+	http.HandleFunc("/stop", withCORS(WithAuth(StopChat)))
 	http.HandleFunc("/login", withCORS(LoginHandler))
+	http.HandleFunc("/user/sessions", withCORS(WithAuth(GetSessionListHandler)))
+	http.HandleFunc("/user/messages", withCORS(WithAuth(GetMessageListHandler)))
 
 	log.Println("Server started on :8080")
 	err := http.ListenAndServe(":8080", nil)
@@ -76,7 +58,15 @@ func main() {
 	}
 }
 
-func (cc *ChatClient) ChatLoop(w http.ResponseWriter, r *http.Request) {
+func ChatLoop(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.URL.Query().Get("session_id")
+	user := r.Context().Value("user").(*User)
+
+	cc, err := user.CreateOrGetSession(sessionID)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Fatal(err)
@@ -238,7 +228,18 @@ func (cc *ChatClient) CallOpenAI(messages []openai.ChatCompletionMessage) (strin
 	return resp.Choices[0].Message.Content, nil
 }
 
-func (cc *ChatClient) StopChat(w http.ResponseWriter, r *http.Request) {
+func StopChat(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.URL.Query().Get("session_id")
+	if sessionID == "" {
+		http.Error(w, "缺少参数sessionid", http.StatusBadRequest)
+		return
+	}
+	user := r.Context().Value("user").(*User)
+	cc, err := user.CreateOrGetSession(sessionID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("获取会话失败: %v", err), http.StatusInternalServerError)
+		return
+	}
 	if cc.cancel != nil {
 		cc.cancel()
 	}
@@ -297,14 +298,15 @@ type LoginResponse struct {
 // }
 
 type User struct {
-	ID       string `json:"id"`
-	Username string `json:"username"`
-	Password string `json:"password"`
+	ID           string         `json:"id"`
+	Username     string         `json:"username"`
+	Password     string         `json:"password"`
+	ChatSessions []*ChatSession `json:"chat_session"`
 }
 
-var users = []User{
-	{ID: "1", Username: "alice", Password: "password123"},
-	{ID: "2", Username: "bob", Password: "password456"},
+var users = []*User{
+	{ID: "1", Username: "alice", Password: "password123", ChatSessions: []*ChatSession{}},
+	{ID: "2", Username: "bob", Password: "password456", ChatSessions: []*ChatSession{}},
 }
 
 func LoginHandler(w http.ResponseWriter, r *http.Request) {
@@ -384,7 +386,7 @@ func ParseJWT(tokenStr string) (jwt.MapClaims, error) {
 func AuthenticateUser(username, password string) (*User, error) {
 	for _, u := range users {
 		if u.Username == username && u.Password == password {
-			return &u, nil
+			return u, nil
 		}
 	}
 	return nil, errors.New("invalid username or password")
@@ -455,8 +457,130 @@ func extractToken(r *http.Request) string {
 func GetUserByID(id string) (*User, error) {
 	for _, user := range users {
 		if user.ID == id {
-			return &user, nil
+			return user, nil
 		}
 	}
 	return nil, errors.New("user not found")
+}
+
+// ======================== 加入多 session 支持 =======================
+
+type ChatSession struct {
+	SessionID   string    `json:"session_id"`
+	SessionName string    `json:"session_name"`
+	CreatedAt   time.Time `json:"created_at"`
+	*ChatClient
+}
+
+func (u *User) CreateOrGetSession(sessionID string) (*ChatSession, error) {
+	session := u.getSession(sessionID)
+	if session != nil {
+		return session, nil
+	}
+
+	cc, err := NewChatClient()
+	if err != nil {
+		return nil, err
+	}
+
+	if sessionID == "" {
+		sessionID = uuid.New().String()
+	}
+	newSession := &ChatSession{
+		SessionID:   sessionID,
+		SessionName: "New chat",
+		CreatedAt:   time.Now(),
+		ChatClient:  cc,
+	}
+	u.ChatSessions = append(u.ChatSessions, newSession)
+
+	return newSession, nil
+}
+
+func (u *User) getSession(sessionID string) *ChatSession {
+	for _, session := range u.ChatSessions {
+		if session.SessionID == sessionID {
+			return session
+		}
+	}
+	return nil
+}
+
+func (u *User) GetSessionList() []*ChatSession {
+	// 最近的排前面
+	// 如果less(i, j)返回true表示i应该排在j前面
+	sort.Slice(u.ChatSessions, func(i, j int) bool {
+		return u.ChatSessions[i].CreatedAt.After(u.ChatSessions[j].CreatedAt)
+	})
+	return u.ChatSessions
+}
+
+func NewChatClient() (*ChatClient, error) {
+	_ = godotenv.Load()
+	apiKey := os.Getenv("OPENAI_API_KEY")
+	baseURL := os.Getenv("OPENAI_API_BASE")
+	model := os.Getenv("OPENAI_API_MODEL")
+	if apiKey == "" || baseURL == "" || model == "" {
+		fmt.Println("检查环境变量设置")
+		return nil, errors.New("检查环境变量设置")
+	}
+
+	config := openai.DefaultConfig(apiKey)
+	config.BaseURL = baseURL
+	openaiClient := openai.NewClientWithConfig(config)
+
+	cc := &ChatClient{
+		openaiClient: openaiClient,
+		model:        model,
+		messages:     make([]openai.ChatCompletionMessage, 0),
+		retainNum:    10,
+		temperature:  0.7,
+		maxTokens:    512,
+	}
+	return cc, nil
+}
+
+// 获取用户的会话列表
+func GetSessionListHandler(w http.ResponseWriter, r *http.Request) {
+	// 从context中获取当前用户
+	user, ok := r.Context().Value("user").(*User)
+	if !ok {
+		http.Error(w, "User not found", http.StatusUnauthorized)
+		return
+	}
+
+	// 获取会话列表
+	sessionList := user.GetSessionList()
+	fmt.Println("GetSessionList", sessionList)
+
+	// 返回会话列表
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(sessionList); err != nil {
+		http.Error(w, "Failed to encode session list", http.StatusInternalServerError)
+	}
+}
+
+func GetMessageListHandler(w http.ResponseWriter, r *http.Request) {
+	// 从context中获取当前用户
+	user, ok := r.Context().Value("user").(*User)
+	if !ok {
+		http.Error(w, "User not found", http.StatusUnauthorized)
+		return
+	}
+
+	sessionID := r.URL.Query().Get("session_id")
+	if sessionID == "" {
+		http.Error(w, "session_id is required", http.StatusBadRequest)
+		return
+	}
+
+	session := user.getSession(sessionID)
+	messageList := session.messages
+
+	fmt.Println("GetMessageList", messageList)
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(messageList); err != nil {
+		http.Error(w, "Failed to encode message list", http.StatusInternalServerError)
+	}
 }
