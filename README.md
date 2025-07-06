@@ -20,10 +20,15 @@ cd frontend && npm run serve
 
 ![llm-chat-web-v0 4](https://github.com/user-attachments/assets/1ba5fdb9-dc5e-4110-808a-78eb82240da3)
 
-## Feature
+## RoadMap
 
 - [x] 加入停止回答功能
 - [x] 加入websocket心跳检测和断线重连
 - [x] 加入多用户支持
 - [x] 加入多会话支持
 - [ ] 加入图片阅读能力
+- [ ] [把Agent能力合并进来](https://github.com/guobinqiu/ai-agent)
+- [ ] 数据持久化
+- [ ] WebSocket改SSE
+- [ ] SSE搭配SharedWorker减少连接数
+- [ ] 前端加上样式
