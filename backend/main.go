@@ -140,24 +140,22 @@ func (cc *ChatClient) ProcessQuery(ws *websocket.Conn, userInput string) error {
 	for {
 		resp, err := stream.Recv()
 		if err != nil {
+			// 添加回答到历史消息
+			cc.messages = append(cc.messages, openai.ChatCompletionMessage{
+				Role:    openai.ChatMessageRoleAssistant,
+				Content: build.String(),
+			})
+
+			// 回答结速了告诉前端要换行
+			ws.WriteMessage(websocket.BinaryMessage, []byte("\n"))
+
 			if errors.Is(err, io.EOF) {
 				log.Println("stream finished")
-
-				// 添加回答到历史消息
-				cc.messages = append(cc.messages, openai.ChatCompletionMessage{
-					Role:    openai.ChatMessageRoleAssistant,
-					Content: build.String(),
-				})
-
-				// 回答结速了告诉前端要换行
-				ws.WriteMessage(websocket.BinaryMessage, []byte("\n"))
-
 				break
 			}
 
 			if errors.Is(err, context.Canceled) {
 				log.Println("流被取消")
-				ws.WriteMessage(websocket.BinaryMessage, []byte("\n"))
 				return err
 			}
 
@@ -231,7 +229,7 @@ func (cc *ChatClient) CallOpenAI(messages []openai.ChatCompletionMessage) (strin
 func StopChat(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.URL.Query().Get("session_id")
 	if sessionID == "" {
-		http.Error(w, "缺少参数sessionid", http.StatusBadRequest)
+		http.Error(w, "缺少参数session_id", http.StatusBadRequest)
 		return
 	}
 	user := r.Context().Value("user").(*User)
@@ -302,6 +300,7 @@ type User struct {
 	Username     string         `json:"username"`
 	Password     string         `json:"password"`
 	ChatSessions []*ChatSession `json:"chat_session"`
+	mu           sync.Mutex
 }
 
 var users = []*User{
@@ -330,7 +329,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 	}
-	token, err := GenerateJWT(*user)
+	token, err := GenerateJWT(user)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -346,7 +345,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 var jwtSecret = []byte("孤舟蓑笠问独钓寒江月")
 
 // 生成JWT Token
-func GenerateJWT(user User) (string, error) {
+func GenerateJWT(user *User) (string, error) {
 	// 存放 user_id、username、role 等简单字段
 	// 放入整个user的话虽然少一次查询，但会造成token过大，更新用户信息也不灵活
 	claims := jwt.MapClaims{
@@ -473,6 +472,9 @@ type ChatSession struct {
 }
 
 func (u *User) CreateOrGetSession(sessionID string) (*ChatSession, error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
 	session := u.getSession(sessionID)
 	if session != nil {
 		return session, nil

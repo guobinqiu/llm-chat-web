@@ -21,6 +21,14 @@
 </template>
 
 <script>
+class ConnectionError extends Error {
+  constructor(type, message) {
+    super(message);
+    this.name = this.constructor.name;
+    this.type = type;
+  }
+}
+
 export default {
   name: 'ChatPage',
   data() {
@@ -51,72 +59,86 @@ export default {
     this.token = localStorage.getItem('token') || '';
     this.sessionID = localStorage.getItem("sessionID") || '';
     if (this.sessionID) {
-      this.connect(this.sessionID);
-      this.fetchSessions();
-      this.fetchMessages(this.sessionID);
+      // this.connect(this.sessionID);
+      this.connect(this.sessionID).then(async () => {
+        await this.fetchSessions();
+        await this.fetchMessages(this.sessionID);
+      }).catch(err => {
+        this.handleConnectionError(err, this.sessionID);
+      });
     } else {
       this.newSession();
     }
   },
   beforeDestroy() {
-    this.socket.close();
+    this.stopSocket();
   },
   methods: {
-    connect(sessionID) {
-      // 初始化 WebSocket 连接
-      this.socket = new WebSocket('ws://localhost:8080/ws?token=' + this.token + '&session_id=' + sessionID);
+    connect(sessionID = '') {
+      return new Promise((resolve, reject) => {
+        // 初始化 WebSocket 连接
+        this.socket = new WebSocket(`ws://localhost:8080/ws?token=${this.token}&session_id=${sessionID}`);
 
-      // 设置 WebSocket 的二进制类型为 arraybuffer
-      this.socket.binaryType = 'arraybuffer'; // 选项有 arraybuffer | blob
+        // 设置 WebSocket 的二进制类型为 arraybuffer
+        this.socket.binaryType = 'arraybuffer'; // 选项有 arraybuffer | blob
 
-      // 监听 WebSocket 事件
-      this.socket.onmessage = (event) => {
-        // 接收服务端的二进制数据并解码
-        const chunk = new TextDecoder().decode(event.data);
+        // 监听 WebSocket 事件
+        this.socket.onmessage = (event) => {
+          // 接收服务端的二进制数据并解码
+          const chunk = new TextDecoder().decode(event.data);
 
-        // 将接收到的消息拼接到当前消息中
-        this.message += chunk
+          // 将接收到的消息拼接到当前消息中
+          this.message += chunk;
 
-        // 如果接收到的消息是换行符，则将当前消息添加到消息列表
-        if (chunk === '\n') {
+          // 如果接收到的消息是换行符，则将当前消息添加到消息列表
+          if (chunk === '\n') {
 
-          // 将当前消息添加到消息列表
-          this.messages.push({ role: 'assistant', content: this.message })
+            // 将当前消息添加到消息列表
+            this.messages.push({ role: 'assistant', content: this.message });
 
-          // 清空当前消息
-          this.message = '';
-        }
-      }
-
-      // 连接成功时的回调
-      this.socket.onopen = async () => {
-        console.log("WebSocket connection established.");
-
-        if (!sessionID) {
-          await this.fetchSessions();
-          if (this.sessions.length > 0) {
-              localStorage.setItem("sessionID", this.sessions[0].session_id);
-              this.sessionID = this.sessions[0].session_id;
-              this.messages = [];
-              this.message = '';
+            // 清空当前消息
+            this.message = '';
           }
         }
-      };
 
-      // 错误处理
-      this.socket.onerror = (error) => {
-        console.error("WebSocket error:", error);
-        this.stopSocket();
-      };
+        // 连接成功时的回调
+        this.socket.onopen = async () => {
+          console.log("WebSocket connection established.");
 
-      // 连接关闭时的回调
-      this.socket.onclose = () => {
-        console.log("WebSocket connection closed.");
-        setTimeout(() => {
-          console.log("尝试重连...");
-          this.connect(this.sessionID);
-        }, 5000);
-      };
+          // 感觉连接成功后的业务代码通过promise移到外面来处理比较好
+          // if (!sessionID) {
+          //   await this.fetchSessions();
+          //   if (this.sessions.length > 0) {
+          //       localStorage.setItem("sessionID", this.sessions[0].session_id);
+          //       this.sessionID = this.sessions[0].session_id;
+          //       this.messages = [];
+          //       this.message = '';
+          //   }
+          // } else {
+          //   await this.fetchSessions();
+          //   await this.fetchMessages(this.sessionID);
+          // }
+
+          resolve(); // 连接成功，调用resolve
+        };
+
+        // 错误处理
+        this.socket.onerror = (error) => {
+          console.error("WebSocket error:", error);
+          // this.stopSocket();
+          reject(new ConnectionError('error', error)); // 连接失败，调用reject
+        };
+
+        // 连接关闭时的回调
+        this.socket.onclose = () => {
+          // console.log("WebSocket connection closed.");
+          // setTimeout(() => {
+          //   console.log("尝试重连...");
+          //   this.connect(this.sessionID);
+          // }, 5000);
+          reject(new ConnectionError('close', 'Connection closed'));
+        };
+      });
     },
     sendMsg() {
       // 如果输入框为空，则不发送消息
@@ -136,7 +158,7 @@ export default {
     },
     async stop() {
       try {
-        const response = await fetch('http://localhost:8080/stop?session_id='+ this.sessionID, {
+        const response = await fetch(`http://localhost:8080/stop?session_id=${this.sessionID}`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -162,8 +184,31 @@ export default {
     logout() {
       // localStorage.removeItem("userID");
       localStorage.removeItem("token");
-      localStorage.removeItem("sessionID")
+      localStorage.removeItem("sessionID");
       this.$router.push("/"); // 跳转到登录页
+    },
+    async selectSession(session) {
+      // 选择会话时进行操作，比如切换当前会话
+      console.log("Selected session:", session);
+
+      try {
+        // 关闭旧连接
+        this.stopSocket();
+
+        this.messages = [];
+        this.message = '';
+        
+        // 重新连接
+        await this.connect(session.session_id);
+
+        // 获取会话消息
+        await this.fetchMessages(session.session_id);
+
+        localStorage.setItem("sessionID", session.session_id);
+        this.sessionID = session.session_id;
+      } catch(error) {
+        this.handleConnectionError(error, session.session_id);
+      }
     },
     async fetchSessions() {
       // 获取当前用户的所有会话
@@ -188,28 +233,9 @@ export default {
         console.error('获取会话列表失败:', error);
       }
     },
-    async selectSession(session) {
-      // 选择会话时进行操作，比如切换当前会话
-      console.log("Selected session:", session);
-
-      // 关闭旧连接
-      this.stopSocket();
-      
-      // 清空消息
-      this.messages = [];
-      this.message = '';
-
-      // 重新连接
-      this.connect(session.session_id)
-
-      await this.fetchMessages(session.session_id);
-      
-      localStorage.setItem("sessionID", session.session_id);
-      this.sessionID = session.session_id
-    },
     async fetchMessages(sessionID) {
       try {
-        const response = await fetch(`http://localhost:8080/user/messages?session_id=`+ sessionID, {
+        const response = await fetch(`http://localhost:8080/user/messages?session_id=${sessionID}`, {
           method: 'GET',
           headers: {
             'Authorization': 'Bearer ' + this.token,
@@ -224,17 +250,37 @@ export default {
         console.log("获取到的消息数据:", data); // 打印获取到的消息
         this.messages = data || []; // 更新当前会话的消息列表
       } catch (error) {
-        console.error('获取消息失败:', error);
+        console.error('获取会话消息失败:', error);
       }
     },
     async newSession() {
-      console.log('newSession')
-      this.connect('')
-      await this.fetchSessions()
-      // localStorage.setItem("sessionID", this.sessions[0].session_id);
-      // this.sessionID = this.sessions[0].session_id
-      // this.messages = []
-      // this.message = ''
+      console.log('newSession');
+      try {
+        await this.connect();
+        await this.fetchSessions();
+        if (this.sessions.length > 0) {
+            localStorage.setItem("sessionID", this.sessions[0].session_id);
+            this.sessionID = this.sessions[0].session_id;
+            this.messages = [];
+            this.message = '';
+        }
+      } catch (error) {
+        this.handleConnectionError(error);
+      }
+    },
+    handleConnectionError(error, sessionID = '') {
+      if (error instanceof ConnectionError) {
+        if (error.type === 'error') {
+          this.stopSocket();
+        } else if (error.type === 'close') {
+          setTimeout(() => {
+            console.log("尝试重连...");
+            this.connect(sessionID);
+          }, 5000);
+        }
+      } else {
+        console.error(error);
+      }
     }
   }
 }
