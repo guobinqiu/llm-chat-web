@@ -29,6 +29,10 @@ cd frontend && npm run serve
 - [ ] 加入图片阅读能力
 - [ ] [把Agent能力合并进来](https://github.com/guobinqiu/ai-agent)
 - [ ] 数据持久化
+
+## Backlog
+
 - [ ] WebSocket改SSE
 - [ ] SSE搭配SharedWorker减少连接数
 - [ ] 前端加上样式
+- [ ] 后端使用Gin框架
