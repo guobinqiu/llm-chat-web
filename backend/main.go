@@ -48,8 +48,9 @@ func main() {
 	http.HandleFunc("/ws", withCORS(WithAuth(ChatLoop)))
 	http.HandleFunc("/stop", withCORS(WithAuth(StopChat)))
 	http.HandleFunc("/login", withCORS(LoginHandler))
-	http.HandleFunc("/user/sessions", withCORS(WithAuth(GetSessionListHandler)))
-	http.HandleFunc("/user/messages", withCORS(WithAuth(GetMessageListHandler)))
+	http.HandleFunc("/users/sessions", withCORS(WithAuth(GetSessionListHandler)))
+	http.HandleFunc("/users/sessions/messages", withCORS(WithAuth(GetMessageListHandler)))
+	http.HandleFunc("/users/sessions/delete", withCORS(WithAuth(DeleteSessionHandler)))
 
 	log.Println("Server started on :8080")
 	err := http.ListenAndServe(":8080", nil)
@@ -475,7 +476,7 @@ func (u *User) CreateOrGetSession(sessionID string) (*ChatSession, error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	session := u.getSession(sessionID)
+	session, _ := u.getSession(sessionID)
 	if session != nil {
 		return session, nil
 	}
@@ -499,13 +500,13 @@ func (u *User) CreateOrGetSession(sessionID string) (*ChatSession, error) {
 	return newSession, nil
 }
 
-func (u *User) getSession(sessionID string) *ChatSession {
-	for _, session := range u.ChatSessions {
+func (u *User) getSession(sessionID string) (*ChatSession, int) {
+	for i, session := range u.ChatSessions {
 		if session.SessionID == sessionID {
-			return session
+			return session, i
 		}
 	}
-	return nil
+	return nil, -1
 }
 
 func (u *User) GetSessionList() []*ChatSession {
@@ -562,6 +563,7 @@ func GetSessionListHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// 获取会话的消息列表
 func GetMessageListHandler(w http.ResponseWriter, r *http.Request) {
 	// 从context中获取当前用户
 	user, ok := r.Context().Value("user").(*User)
@@ -576,7 +578,7 @@ func GetMessageListHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := user.getSession(sessionID)
+	session, _ := user.getSession(sessionID)
 	messageList := session.messages
 
 	fmt.Println("GetMessageList", messageList)
@@ -584,5 +586,33 @@ func GetMessageListHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(messageList); err != nil {
 		http.Error(w, "Failed to encode message list", http.StatusInternalServerError)
+	}
+}
+
+// 删除用户的会话
+func DeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.URL.Query().Get("session_id")
+	// 从context中获取当前用户
+	user, ok := r.Context().Value("user").(*User)
+	if !ok {
+		http.Error(w, "User not found", http.StatusUnauthorized)
+		return
+	}
+
+	// 从会话列表中删除
+	_, index := user.getSession(sessionID)
+	if index == -1 {
+		http.Error(w, "Session not found", http.StatusNotFound)
+		return
+	}
+	user.ChatSessions = append(user.ChatSessions[:index], user.ChatSessions[index+1:]...)
+
+	sessionList := user.GetSessionList()
+	fmt.Println("GetSessionList", sessionList)
+
+	// 返回会话列表
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(sessionList); err != nil {
+		http.Error(w, "Failed to encode session list", http.StatusInternalServerError)
 	}
 }

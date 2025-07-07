@@ -6,6 +6,7 @@
       <ul>
         <li v-for="(session, index) in sessions" :key="index" @click="selectSession(session)">
           {{ session.session_id }}
+          <button @click="deleteSession(session)">x</button>
         </li>
       </ul>
     </div>
@@ -213,7 +214,7 @@ export default {
     async fetchSessions() {
       // 获取当前用户的所有会话
       try {
-        const response = await fetch('http://localhost:8080/user/sessions', {
+        const response = await fetch('http://localhost:8080/users/sessions', {
           method: 'GET',
           headers: {
             'Authorization': 'Bearer ' + this.token,
@@ -235,7 +236,7 @@ export default {
     },
     async fetchMessages(sessionID) {
       try {
-        const response = await fetch(`http://localhost:8080/user/messages?session_id=${sessionID}`, {
+        const response = await fetch(`http://localhost:8080/users/sessions/messages?session_id=${sessionID}`, {
           method: 'GET',
           headers: {
             'Authorization': 'Bearer ' + this.token,
@@ -266,6 +267,28 @@ export default {
         }
       } catch (error) {
         this.handleConnectionError(error);
+      }
+    },
+    async deleteSession(session) {
+      try {
+        const response = await fetch(`http://localhost:8080/users/sessions/delete?session_id=${session.session_id}`, {
+          method: 'GET',
+          headers: {
+            'Authorization': 'Bearer ' + this.token,
+          },
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json();
+        
+        console.log("获取到的会话数据:", data);
+        
+        this.sessions = data || [];
+      } catch (error) {
+        console.error('删除会话数据失败:', error);
       }
     },
     handleConnectionError(error, sessionID = '') {
