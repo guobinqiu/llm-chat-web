@@ -31,6 +31,7 @@ cd frontend && npm run serve
 - [x] 加入流式调用Funcation Call
 - [ ] 加入图片阅读能力
 - [ ] 数据持久化
+- [ ] 加入RAG支持
 
 ## Backlog
 
