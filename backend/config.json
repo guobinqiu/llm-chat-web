@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "calculator": {
+      "type": "stdio",
+      "command": "bin/calculator-server",
+      "args": []
+    },
+    "ip-location-query": {
+      "type": "http",
+      "command": "http://localhost:8082/mcp",
+      "args": []
+    }
+  }
+}

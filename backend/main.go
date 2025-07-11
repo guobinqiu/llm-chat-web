@@ -14,15 +14,28 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-playground/validator"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
+	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/sashabaranov/go-openai"
 )
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+type MCPConfig struct {
+	MCPServers map[string]MCPServer `json:"mcpServers"`
+}
+
+type MCPServer struct {
+	Type    string   `json:"type" validate:"required"`
+	Command string   `json:"command" validate:"required"`
+	Args    []string `json:"args,omitempty"`
 }
 
 type ChatClient struct {
@@ -34,6 +47,7 @@ type ChatClient struct {
 	cancel       context.CancelFunc
 	temperature  float32 // 控制回答的随机性，范围是 0 到 2（默认 1）
 	maxTokens    int     // 限制返回的最大 token 数
+	mcpClients   []*client.Client
 }
 
 type Heartbeat struct {
@@ -76,8 +90,8 @@ func ChatLoop(w http.ResponseWriter, r *http.Request) {
 
 	heartbeat := &Heartbeat{
 		lastPongUnix: time.Now().Unix(),
-		pingInterval: 5 * time.Second,
-		pongTimeout:  3 * time.Second,
+		pingInterval: 50 * time.Second,
+		pongTimeout:  30 * time.Second,
 		ws:           ws,
 	}
 
@@ -112,6 +126,34 @@ func (cc *ChatClient) ProcessQuery(ws *websocket.Conn, userInput string) error {
 	cc.ctx, cc.cancel = context.WithCancel(context.Background())
 	defer cc.cancel()
 
+	// 维护toolName到mcpClient的映射
+	toolNameMap := make(map[string]*client.Client)
+
+	// 列出所有可用工具
+	availableTools := []openai.Tool{}
+
+	for _, mcpClient := range cc.mcpClients {
+		toolsResp, err := mcpClient.ListTools(cc.ctx, mcp.ListToolsRequest{})
+		if err != nil {
+			log.Printf("Failed to list tools: %v", err)
+		}
+		for _, tool := range toolsResp.Tools {
+			// fmt.Println("name:", tool.Name)
+			// fmt.Println("description:", tool.Description)
+			// fmt.Println("parameters:", tool.InputSchema)
+			availableTools = append(availableTools, openai.Tool{
+				Type: openai.ToolTypeFunction,
+				Function: &openai.FunctionDefinition{
+					Name:        tool.Name,
+					Description: tool.Description,
+					Parameters:  tool.InputSchema,
+				},
+			})
+
+			toolNameMap[tool.Name] = mcpClient
+		}
+	}
+
 	// 合并上下文
 	if err := cc.Merge(); err != nil {
 		return fmt.Errorf("合并上下文失败: %v", err)
@@ -123,55 +165,160 @@ func (cc *ChatClient) ProcessQuery(ws *websocket.Conn, userInput string) error {
 		Content: userInput,
 	})
 
-	stream, err := cc.openaiClient.CreateChatCompletionStream(cc.ctx, openai.ChatCompletionRequest{
-		Model:       cc.model,
-		Messages:    cc.messages,
-		Stream:      true, // 开启流式响应
-		Temperature: cc.temperature,
-		MaxTokens:   cc.maxTokens,
-	})
-	if err != nil {
-		return err
-	}
-	defer stream.Close()
-
 	//	构建一个字符串，用于存储回答
 	var build strings.Builder
 
+	type ToolCallBuilder struct {
+		Index     *int
+		ID        string
+		Name      string
+		Arguments strings.Builder
+	}
+	toolCalls := make(map[int]*ToolCallBuilder)
+
+OuterLoop:
 	for {
-		resp, err := stream.Recv()
+		stream, err := cc.openaiClient.CreateChatCompletionStream(cc.ctx, openai.ChatCompletionRequest{
+			Model:       cc.model,
+			Messages:    cc.messages,
+			Stream:      true, // 开启流式响应
+			Temperature: cc.temperature,
+			MaxTokens:   cc.maxTokens,
+			Tools:       availableTools,
+		})
 		if err != nil {
-			// 添加回答到历史消息
-			cc.messages = append(cc.messages, openai.ChatCompletionMessage{
-				Role:    openai.ChatMessageRoleAssistant,
-				Content: build.String(),
-			})
-
-			// 回答结速了告诉前端要换行
-			ws.WriteMessage(websocket.BinaryMessage, []byte("\n"))
-
-			if errors.Is(err, io.EOF) {
-				log.Println("stream finished")
-				break
-			}
-
-			if errors.Is(err, context.Canceled) {
-				log.Println("流被取消")
-				return err
-			}
-
-			log.Printf("stream receive error: %v", err)
-			break
+			return err
 		}
+		defer stream.Close()
 
-		// OpenAI的API设计上支持一次请求返回多个候选回答（choices）默认为1
-		for _, choice := range resp.Choices {
-			content := choice.Delta.Content
-			if content != "" {
-				build.WriteString(content)
-				if err := ws.WriteMessage(websocket.BinaryMessage, []byte(content)); err != nil {
-					log.Printf("websocket write error: %v", err)
-					break
+		build.Reset()
+
+		for {
+			resp, err := stream.Recv()
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					log.Println("stream finished")
+					if build.Len() > 0 {
+						// 添加回答到历史消息
+						cc.messages = append(cc.messages, openai.ChatCompletionMessage{
+							Role:    openai.ChatMessageRoleAssistant,
+							Content: build.String(),
+						})
+
+						// 回答结速了告诉前端要换行
+						ws.WriteMessage(websocket.BinaryMessage, []byte("\n\n"))
+
+						break OuterLoop
+					} else if len(toolCalls) > 0 {
+						toolCallMessages := []openai.ChatCompletionMessage{}
+						successfulToolCalls := []openai.ToolCall{}
+
+						for _, builder := range toolCalls {
+							fmt.Println("== Tool Call ==")
+							fmt.Println("ID:", builder.ID)
+							fmt.Println("Name:", builder.Name)
+							fmt.Println("Arguments:", builder.Arguments.String())
+							toolName := builder.Name
+							toolArgsRaw := builder.Arguments.String()
+							// fmt.Println("=====toolCall.Function.Arguments:", toolArgsRaw)
+							var toolArgs map[string]any
+							_ = json.Unmarshal([]byte(toolArgsRaw), &toolArgs)
+
+							// 调用工具
+							req := mcp.CallToolRequest{}
+							req.Params.Name = toolName
+							req.Params.Arguments = toolArgs
+							//resp, err := cc.mcpClient.CallTool(ctx, req)
+							mcpClient, ok := toolNameMap[toolName]
+							if !ok || mcpClient == nil {
+								log.Printf("工具 [%s] 没有找到对应的 MCP client", toolName)
+								continue
+							}
+							resp, err := mcpClient.CallTool(cc.ctx, req)
+							if err != nil {
+								log.Printf("工具调用失败: %v", err)
+								continue
+							}
+
+							// 构造 tool message
+							// 把工具返回的答案记录下来，作为后续模型推理的输入
+							toolCallMessages = append(toolCallMessages, openai.ChatCompletionMessage{
+								Role:       openai.ChatMessageRoleTool, // 说明是工具的响应
+								ToolCallID: builder.ID,                 // 绑定之前模型说要调用的那个 tool_call.id
+								Content:    fmt.Sprintf("%s", resp.Content),
+							})
+
+							successfulToolCalls = append(successfulToolCalls, openai.ToolCall{
+								Index: builder.Index,
+								ID:    builder.ID,
+								Type:  openai.ToolTypeFunction,
+								Function: openai.FunctionCall{
+									Name:      builder.Name,
+									Arguments: builder.Arguments.String(),
+								},
+							})
+						}
+
+						// 添加 assistant tool call 信息
+						if len(successfulToolCalls) > 0 {
+							cc.messages = append(cc.messages, openai.ChatCompletionMessage{
+								Role:      openai.ChatMessageRoleAssistant,
+								Content:   "",
+								ToolCalls: successfulToolCalls,
+							})
+						}
+
+						// 把工具结果作为 observation 添加到上下文
+						if len(toolCallMessages) > 0 {
+							cc.messages = append(cc.messages, toolCallMessages...)
+						}
+						break
+					}
+				}
+
+				if errors.Is(err, context.Canceled) {
+					log.Println("流被取消")
+
+					// 添加回答到历史消息
+					cc.messages = append(cc.messages, openai.ChatCompletionMessage{
+						Role:    openai.ChatMessageRoleAssistant,
+						Content: build.String(),
+					})
+
+					// 回答结速了告诉前端要换行
+					ws.WriteMessage(websocket.BinaryMessage, []byte("\n"))
+
+					return err
+				}
+
+				log.Printf("stream receive error: %v", err)
+				break OuterLoop
+			}
+
+			// OpenAI的API设计上支持一次请求返回多个候选回答（choices）默认为1
+			for _, choice := range resp.Choices {
+				content := choice.Delta.Content
+				if content != "" { // 若直接生成文本
+					build.WriteString(content)
+					if err := ws.WriteMessage(websocket.BinaryMessage, []byte(content)); err != nil {
+						log.Printf("websocket write error: %v", err)
+						break
+					}
+				}
+
+				if len(choice.Delta.ToolCalls) > 0 { // 若调用工具
+					for _, tool := range choice.Delta.ToolCalls {
+						builder, exists := toolCalls[*tool.Index]
+						if !exists {
+							builder = &ToolCallBuilder{
+								Index: tool.Index,
+								ID:    tool.ID,
+								Name:  tool.Function.Name,
+							}
+							toolCalls[*tool.Index] = builder
+						}
+						builder.Arguments.WriteString(tool.Function.Arguments)
+					}
 				}
 			}
 		}
@@ -519,6 +666,21 @@ func (u *User) GetSessionList() []*ChatSession {
 }
 
 func NewChatClient() (*ChatClient, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	mcpClients, errs := LoadMCPClients("config.json", ctx)
+	if len(errs) > 0 {
+		for _, err := range errs {
+			log.Println(err)
+		}
+	}
+	// defer func() {
+	// 	for _, mcpClient := range mcpClients {
+	// 		mcpClient.Close()
+	// 	}
+	// }()
+
 	_ = godotenv.Load()
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	baseURL := os.Getenv("OPENAI_API_BASE")
@@ -539,6 +701,7 @@ func NewChatClient() (*ChatClient, error) {
 		retainNum:    10,
 		temperature:  0.7,
 		maxTokens:    512,
+		mcpClients:   mcpClients,
 	}
 	return cc, nil
 }
@@ -615,4 +778,66 @@ func DeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(sessionList); err != nil {
 		http.Error(w, "Failed to encode session list", http.StatusInternalServerError)
 	}
+}
+
+// 创建客户端实例，连接 MCP 服务端
+func LoadMCPClients(configPath string, ctx context.Context) ([]*client.Client, []error) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, []error{err}
+	}
+
+	var mcpConfig MCPConfig
+	err = json.Unmarshal(data, &mcpConfig)
+	if err != nil {
+		return nil, []error{err}
+	}
+
+	if err := validator.New().Struct(mcpConfig); err != nil {
+		return nil, []error{err}
+	}
+
+	var mcpClients []*client.Client
+	var errors []error
+
+	for name, mcpServer := range mcpConfig.MCPServers {
+		var mcpClient *client.Client
+		var err error
+
+		switch strings.ToLower(mcpServer.Type) {
+		case "stdio":
+			mcpClient, err = client.NewStdioMCPClient(mcpServer.Command, mcpServer.Args)
+		case "http":
+			mcpClient, err = client.NewStreamableHttpClient(mcpServer.Command)
+		case "sse":
+			mcpClient, err = client.NewSSEMCPClient(mcpServer.Command)
+		default:
+			err = fmt.Errorf("未知服务类型: %s (%s)", name, mcpServer.Type)
+		}
+
+		if err != nil {
+			errors = append(errors, fmt.Errorf("[%s] 创建客户端失败: %v", name, err))
+			continue
+		}
+
+		// 初始化 MCP 客户端
+		fmt.Println("Initializing client...")
+		initRequest := mcp.InitializeRequest{}
+		initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+		initRequest.Params.ClientInfo = mcp.Implementation{
+			Name:    name, // 使用配置中的名称作为客户端名
+			Version: "1.0.0",
+		}
+		initResult, err := mcpClient.Initialize(ctx, initRequest)
+		if err != nil {
+			errors = append(errors, fmt.Errorf("[%s] 初始化失败: %v", name, err))
+			continue
+		}
+
+		fmt.Printf("[%s] Connected to server: %s %s\n", name, initResult.ServerInfo.Name, initResult.ServerInfo.Version)
+
+		mcpClients = append(mcpClients, mcpClient)
+	}
+
+	return mcpClients, errors
 }

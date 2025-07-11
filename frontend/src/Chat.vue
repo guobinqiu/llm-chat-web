@@ -92,7 +92,7 @@ export default {
           this.message += chunk;
 
           // 如果接收到的消息是换行符，则将当前消息添加到消息列表
-          if (chunk === '\n') {
+          if (chunk === '\n\n') {
 
             // 将当前消息添加到消息列表
             this.messages.push({ role: 'assistant', content: this.message });
