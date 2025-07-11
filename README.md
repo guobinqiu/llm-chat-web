@@ -38,3 +38,4 @@ cd frontend && npm run serve
 - [ ] SSE搭配SharedWorker减少连接数
 - [ ] 前端加上样式
 - [ ] 后端使用Gin框架
+- [ ] 代码重构
