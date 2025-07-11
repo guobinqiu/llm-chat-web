@@ -742,7 +742,14 @@ func GetMessageListHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	session, _ := user.getSession(sessionID)
-	messageList := session.messages
+
+	var messageList []openai.ChatCompletionMessage
+	for _, message := range session.messages {
+		if (message.Role == openai.ChatMessageRoleUser ||
+			message.Role == openai.ChatMessageRoleAssistant) && strings.TrimSpace(message.Content) != "" {
+			messageList = append(messageList, message)
+		}
+	}
 
 	fmt.Println("GetMessageList", messageList)
 
