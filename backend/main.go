@@ -38,6 +38,8 @@ type MCPServer struct {
 	Args    []string `json:"args,omitempty"`
 }
 
+type fn func(map[string]any) string
+
 type ChatClient struct {
 	openaiClient *openai.Client
 	model        string
@@ -48,6 +50,7 @@ type ChatClient struct {
 	temperature  float32 // 控制回答的随机性，范围是 0 到 2（默认 1）
 	maxTokens    int     // 限制返回的最大 token 数
 	mcpClients   []*client.Client
+	funcs        map[string]fn
 }
 
 type Heartbeat struct {
@@ -130,7 +133,36 @@ func (cc *ChatClient) ProcessQuery(ws *websocket.Conn, userInput string) error {
 	toolNameMap := make(map[string]*client.Client)
 
 	// 列出所有可用工具
-	availableTools := []openai.Tool{}
+	availableTools := []openai.Tool{
+		{
+			Type: "function",
+			Function: &openai.FunctionDefinition{
+				Name:        "getWeather",
+				Description: "Get weather for a given city",
+				Parameters: json.RawMessage(`{
+					"type": "object",
+					"properties": {
+						"city": { "type": "string" }
+					},
+					"required": ["city"]
+				}`),
+			},
+		},
+		{
+			Type: "function",
+			Function: &openai.FunctionDefinition{
+				Name:        "getTime",
+				Description: "Get current time for a given city",
+				Parameters: json.RawMessage(`{
+					"type": "object",
+					"properties": {
+						"city": { "type": "string" }
+					},
+					"required": ["city"]
+				}`),
+			},
+		},
+	}
 
 	for _, mcpClient := range cc.mcpClients {
 		toolsResp, err := mcpClient.ListTools(cc.ctx, mcp.ListToolsRequest{})
@@ -212,6 +244,7 @@ OuterLoop:
 					} else if len(toolCalls) > 0 {
 						toolCallMessages := []openai.ChatCompletionMessage{}
 						successfulToolCalls := []openai.ToolCall{}
+						var result string
 
 						for _, builder := range toolCalls {
 							fmt.Println("== Tool Call ==")
@@ -229,15 +262,30 @@ OuterLoop:
 							req.Params.Name = toolName
 							req.Params.Arguments = toolArgs
 							//resp, err := cc.mcpClient.CallTool(ctx, req)
+
 							mcpClient, ok := toolNameMap[toolName]
 							if !ok || mcpClient == nil {
 								log.Printf("工具 [%s] 没有找到对应的 MCP client", toolName)
-								continue
-							}
-							resp, err := mcpClient.CallTool(cc.ctx, req)
-							if err != nil {
-								log.Printf("工具调用失败: %v", err)
-								continue
+
+								log.Println("function call")
+								fn, ok := cc.funcs[toolName]
+								if !ok {
+									log.Printf("函数未注册: %s", toolName)
+									continue
+								}
+								var args map[string]any
+								if err := json.Unmarshal([]byte(toolArgsRaw), &args); err != nil {
+									log.Printf("参数解析失败: %v", err)
+									continue
+								}
+								result = fn(args)
+							} else {
+								resp, err := mcpClient.CallTool(cc.ctx, req)
+								if err != nil {
+									log.Printf("工具调用失败: %v", err)
+									continue
+								}
+								result = fmt.Sprintf("%s", resp.Content)
 							}
 
 							// 构造 tool message
@@ -245,7 +293,7 @@ OuterLoop:
 							toolCallMessages = append(toolCallMessages, openai.ChatCompletionMessage{
 								Role:       openai.ChatMessageRoleTool, // 说明是工具的响应
 								ToolCallID: builder.ID,                 // 绑定之前模型说要调用的那个 tool_call.id
-								Content:    fmt.Sprintf("%s", resp.Content),
+								Content:    result,
 							})
 
 							successfulToolCalls = append(successfulToolCalls, openai.ToolCall{
@@ -703,6 +751,13 @@ func NewChatClient() (*ChatClient, error) {
 		maxTokens:    512,
 		mcpClients:   mcpClients,
 	}
+
+	// 注册函数到chatClient
+	cc.funcs = map[string]fn{
+		"getWeather": getWeather,
+		"getTime":    getTime,
+	}
+
 	return cc, nil
 }
 
@@ -847,4 +902,30 @@ func LoadMCPClients(configPath string, ctx context.Context) ([]*client.Client, [
 	}
 
 	return mcpClients, errors
+}
+
+func getWeather(args map[string]any) string {
+	city, _ := args["city"].(string)
+	weatherData := map[string]string{
+		"New York":      "Sunny, 25°C",
+		"Tokyo":         "Cloudy, 22°C",
+		"San Francisco": "Foggy, 18°C",
+	}
+	if val, ok := weatherData[city]; ok {
+		return val
+	}
+	return "未知城市的天气"
+}
+
+func getTime(args map[string]any) string {
+	city, _ := args["city"].(string)
+	timeData := map[string]string{
+		"New York":      "14:30 PM",
+		"Tokyo":         "03:30 AM",
+		"San Francisco": "11:30 AM",
+	}
+	if val, ok := timeData[city]; ok {
+		return val
+	}
+	return "未知城市的时间"
 }
