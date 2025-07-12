@@ -61,6 +61,13 @@ type Heartbeat struct {
 	ws           *websocket.Conn
 }
 
+type ToolCallBuilder struct {
+	Index     *int
+	ID        string
+	Name      string
+	Arguments strings.Builder
+}
+
 func main() {
 	http.HandleFunc("/ws", withCORS(WithAuth(ChatLoop)))
 	http.HandleFunc("/stop", withCORS(WithAuth(StopChat)))
@@ -197,19 +204,14 @@ func (cc *ChatClient) ProcessQuery(ws *websocket.Conn, userInput string) error {
 		Content: userInput,
 	})
 
-	//	构建一个字符串，用于存储回答
-	var build strings.Builder
-
-	type ToolCallBuilder struct {
-		Index     *int
-		ID        string
-		Name      string
-		Arguments strings.Builder
-	}
-	toolCalls := make(map[int]*ToolCallBuilder)
-
 OuterLoop:
 	for {
+		// 拼接文本内容
+		var finalAnswer strings.Builder
+
+		// 拼接工具参数
+		toolCalls := make(map[int]*ToolCallBuilder)
+
 		stream, err := cc.openaiClient.CreateChatCompletionStream(cc.ctx, openai.ChatCompletionRequest{
 			Model:       cc.model,
 			Messages:    cc.messages,
@@ -223,18 +225,16 @@ OuterLoop:
 		}
 		defer stream.Close()
 
-		build.Reset()
-
 		for {
 			resp, err := stream.Recv()
 			if err != nil {
 				if errors.Is(err, io.EOF) {
 					log.Println("stream finished")
-					if build.Len() > 0 {
+					if finalAnswer.Len() > 0 {
 						// 添加回答到历史消息
 						cc.messages = append(cc.messages, openai.ChatCompletionMessage{
 							Role:    openai.ChatMessageRoleAssistant,
-							Content: build.String(),
+							Content: finalAnswer.String(),
 						})
 
 						// 回答结速了告诉前端要换行
@@ -330,7 +330,7 @@ OuterLoop:
 					// 添加回答到历史消息
 					cc.messages = append(cc.messages, openai.ChatCompletionMessage{
 						Role:    openai.ChatMessageRoleAssistant,
-						Content: build.String(),
+						Content: finalAnswer.String(),
 					})
 
 					// 回答结速了告诉前端要换行
@@ -347,7 +347,7 @@ OuterLoop:
 			for _, choice := range resp.Choices {
 				content := choice.Delta.Content
 				if content != "" { // 若直接生成文本
-					build.WriteString(content)
+					finalAnswer.WriteString(content)
 					if err := ws.WriteMessage(websocket.BinaryMessage, []byte(content)); err != nil {
 						log.Printf("websocket write error: %v", err)
 						break
