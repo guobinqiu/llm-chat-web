@@ -307,7 +307,9 @@ OuterLoop:
 							})
 						}
 
-						// 添加 assistant tool call 信息
+						// 以下A,B都作为下一轮推理的输入
+
+						// A.添加 assistant tool call 信息 (模型希望调用这些工具)
 						if len(successfulToolCalls) > 0 {
 							cc.messages = append(cc.messages, openai.ChatCompletionMessage{
 								Role:      openai.ChatMessageRoleAssistant,
@@ -316,7 +318,7 @@ OuterLoop:
 							})
 						}
 
-						// 把工具结果作为 observation 添加到上下文
+						// B.把工具结果作为 observation 添加到上下文 (这些工具的调用结果)
 						if len(toolCallMessages) > 0 {
 							cc.messages = append(cc.messages, toolCallMessages...)
 						}
