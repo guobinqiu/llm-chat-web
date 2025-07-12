@@ -30,7 +30,9 @@ cd frontend && npm run serve
 - [x] 加入流式调用MCP
 - [x] 加入流式调用Funcation Call
 - [ ] 加入图片阅读能力
-- [ ] 数据持久化
+- [ ] 用户数据持久化
+- [ ] 消息数据持久化
+- [ ] 加入RAG支持
 
 ## Backlog
 
@@ -38,3 +40,4 @@ cd frontend && npm run serve
 - [ ] SSE搭配SharedWorker减少连接数
 - [ ] 前端加上样式
 - [ ] 后端使用Gin框架
+- [ ] 代码重构
