@@ -824,12 +824,16 @@ func DeleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 从会话列表中删除
-	_, index := user.getSession(sessionID)
+	session, index := user.getSession(sessionID)
 	if index == -1 {
 		http.Error(w, "Session not found", http.StatusNotFound)
 		return
 	}
+
+	// 关闭MCP客户端
+	session.ChatClient.CloseMCPClients()
+
+	// 从会话列表中删除
 	user.ChatSessions = append(user.ChatSessions[:index], user.ChatSessions[index+1:]...)
 
 	sessionList := user.GetSessionList()
@@ -928,4 +932,10 @@ func getTime(args map[string]any) string {
 		return val
 	}
 	return "未知城市的时间"
+}
+
+func (cc *ChatClient) CloseMCPClients() {
+	for _, mcpClient := range cc.mcpClients {
+		_ = mcpClient.Close()
+	}
 }
