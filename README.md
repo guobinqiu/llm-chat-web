@@ -1,19 +1,25 @@
-# LLM Chat Web版
+# LLM Chat Web版 (v0.8)
 
 把 [LLM Chat](https://github.com/guobinqiu/llm-chat) (命令行版) 改成 Web 版
 
 ## 运行
 
-1. 运行后端服务
+1. 运行MCP工具
+
+```
+cd backend/tools/ip_location_query && go run main.go
+```
+
+2. 运行后端服务
 
 ```
 cd backend && go run main.go
 ```
 
-2. 运行前端服务
+3. 运行前端服务
 
 ```
-cd frontend && npm run serve
+cd frontend && npm run serve -- --port 8081
 ```
 
 ## 效果图
@@ -29,6 +35,7 @@ cd frontend && npm run serve
 - [x] [把Agent能力合并进来](https://github.com/guobinqiu/ai-agent)
 - [x] 加入流式调用MCP
 - [x] 加入流式调用Funcation Call
+- [x] 工具调用改成并行 (目前串行)
 - [ ] 加入图片阅读能力
 - [ ] 用户数据持久化
 - [ ] 消息数据持久化
@@ -41,4 +48,3 @@ cd frontend && npm run serve
 - [ ] 前端加上样式
 - [ ] 后端使用Gin框架
 - [ ] 代码重构
-- [ ] 工具调用改成并行 (目前串行)

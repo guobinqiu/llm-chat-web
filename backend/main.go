@@ -51,6 +51,7 @@ type ChatClient struct {
 	maxTokens    int     // 限制返回的最大 token 数
 	mcpClients   []*client.Client
 	funcs        map[string]fn
+	wg           sync.WaitGroup
 }
 
 type Heartbeat struct {
@@ -66,6 +67,11 @@ type ToolCallBuilder struct {
 	ID        string
 	Name      string
 	Arguments strings.Builder
+}
+
+type ToolCallResult struct {
+	Message openai.ChatCompletionMessage
+	Call    openai.ToolCall
 }
 
 func main() {
@@ -244,67 +250,79 @@ OuterLoop:
 					} else if len(toolCalls) > 0 {
 						toolCallMessages := []openai.ChatCompletionMessage{}
 						successfulToolCalls := []openai.ToolCall{}
+
 						var result string
+						resultCh := make(chan ToolCallResult, len(toolCalls))
 
+						cc.wg.Add(len(toolCalls))
 						for _, builder := range toolCalls {
-							fmt.Println("== Tool Call ==")
-							fmt.Println("ID:", builder.ID)
-							fmt.Println("Name:", builder.Name)
-							fmt.Println("Arguments:", builder.Arguments.String())
-							toolName := builder.Name
-							toolArgsRaw := builder.Arguments.String()
-							// fmt.Println("=====toolCall.Function.Arguments:", toolArgsRaw)
-							var toolArgs map[string]any
-							_ = json.Unmarshal([]byte(toolArgsRaw), &toolArgs)
+							go func(builder *ToolCallBuilder) {
+								defer cc.wg.Done()
+								fmt.Println("== Tool Call ==")
+								fmt.Println("ID:", builder.ID)
+								fmt.Println("Name:", builder.Name)
+								fmt.Println("Arguments:", builder.Arguments.String())
+								toolName := builder.Name
+								toolArgsRaw := builder.Arguments.String()
+								// fmt.Println("=====toolCall.Function.Arguments:", toolArgsRaw)
 
-							// 调用工具
-							req := mcp.CallToolRequest{}
-							req.Params.Name = toolName
-							req.Params.Arguments = toolArgs
-							//resp, err := cc.mcpClient.CallTool(ctx, req)
+								mcpClient, ok := toolNameMap[toolName]
+								if ok { // mcp call
+									log.Println("mcp call")
+									var toolArgs map[string]any
+									_ = json.Unmarshal([]byte(toolArgsRaw), &toolArgs)
 
-							mcpClient, ok := toolNameMap[toolName]
-							if !ok || mcpClient == nil {
-								log.Printf("工具 [%s] 没有找到对应的 MCP client", toolName)
+									// 调用工具
+									req := mcp.CallToolRequest{}
+									req.Params.Name = toolName
+									req.Params.Arguments = toolArgs
+									//resp, err := cc.mcpClient.CallTool(ctx, req)
 
-								log.Println("function call")
-								fn, ok := cc.funcs[toolName]
-								if !ok {
-									log.Printf("函数未注册: %s", toolName)
-									continue
+									resp, err := mcpClient.CallTool(cc.ctx, req)
+									if err != nil {
+										log.Printf("工具调用失败: %v", err)
+										return
+									}
+									result = fmt.Sprintf("%s", resp.Content)
+								} else { // funcation call
+									log.Println("function call")
+									fn, ok := cc.funcs[toolName]
+									if !ok {
+										log.Printf("未知工具名: %s，既不是 MCP 工具，也不是函数", toolName)
+										return
+									}
+									var args map[string]any
+									if err := json.Unmarshal([]byte(toolArgsRaw), &args); err != nil {
+										log.Printf("参数解析失败: %v", err)
+										return
+									}
+									result = fn(args)
 								}
-								var args map[string]any
-								if err := json.Unmarshal([]byte(toolArgsRaw), &args); err != nil {
-									log.Printf("参数解析失败: %v", err)
-									continue
-								}
-								result = fn(args)
-							} else {
-								resp, err := mcpClient.CallTool(cc.ctx, req)
-								if err != nil {
-									log.Printf("工具调用失败: %v", err)
-									continue
-								}
-								result = fmt.Sprintf("%s", resp.Content)
-							}
 
-							// 构造 tool message
-							// 把工具返回的答案记录下来，作为后续模型推理的输入
-							toolCallMessages = append(toolCallMessages, openai.ChatCompletionMessage{
-								Role:       openai.ChatMessageRoleTool, // 说明是工具的响应
-								ToolCallID: builder.ID,                 // 绑定之前模型说要调用的那个 tool_call.id
-								Content:    result,
-							})
+								resultCh <- ToolCallResult{
+									Message: openai.ChatCompletionMessage{
+										Role:       openai.ChatMessageRoleTool,
+										ToolCallID: builder.ID,
+										Content:    result,
+									},
+									Call: openai.ToolCall{
+										Index: builder.Index,
+										ID:    builder.ID,
+										Type:  openai.ToolTypeFunction,
+										Function: openai.FunctionCall{
+											Name:      builder.Name,
+											Arguments: builder.Arguments.String(),
+										},
+									},
+								}
+							}(builder)
+						}
+						cc.wg.Wait()
+						close(resultCh)
 
-							successfulToolCalls = append(successfulToolCalls, openai.ToolCall{
-								Index: builder.Index,
-								ID:    builder.ID,
-								Type:  openai.ToolTypeFunction,
-								Function: openai.FunctionCall{
-									Name:      builder.Name,
-									Arguments: builder.Arguments.String(),
-								},
-							})
+						for res := range resultCh {
+							toolCallMessages = append(toolCallMessages, res.Message)
+							successfulToolCalls = append(successfulToolCalls, res.Call)
 						}
 
 						// 以下A,B都作为下一轮推理的输入
@@ -752,6 +770,7 @@ func NewChatClient() (*ChatClient, error) {
 		temperature:  0.7,
 		maxTokens:    512,
 		mcpClients:   mcpClients,
+		wg:           sync.WaitGroup{},
 	}
 
 	// 注册函数到chatClient
