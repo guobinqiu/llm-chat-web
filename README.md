@@ -1,4 +1,4 @@
-# LLM Chat Web版 (v0.8)
+# LLM Chat Web版
 
 把 [LLM Chat](https://github.com/guobinqiu/llm-chat) (命令行版) 改成 Web 版
 
