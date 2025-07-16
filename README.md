@@ -43,7 +43,7 @@ cd frontend && npm run serve -- --port 8081
 
 ## Backlog
 
-- [ ] WebSocket改SSE
+- [ ] WebSocket改[SSE](https://github.com/guobinqiu/sse-demo)
 - [ ] SSE搭配SharedWorker减少连接数
 - [ ] 前端加上样式
 - [ ] 后端使用Gin框架
