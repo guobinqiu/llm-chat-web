@@ -36,7 +36,7 @@ cd frontend && npm run serve -- --port 8081
 - [x] 加入流式调用MCP
 - [x] 加入流式调用Funcation Call
 - [x] 工具调用改成并行 (目前串行)
-- [ ] 加入图片阅读能力
+- [ ] [加入图片阅读能力](https://github.com/guobinqiu/llm-qwen-vl)
 - [ ] 用户数据持久化
 - [ ] 消息数据持久化
 - [ ] 加入RAG支持
